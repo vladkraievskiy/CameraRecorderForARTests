@@ -2,27 +2,38 @@ package com.kaa_solutions.camerarecorderforartests
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ProgressDialog
 import android.content.DialogInterface
 import android.content.Intent
 import android.content.res.Configuration
+import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.RectF
 import android.graphics.SurfaceTexture
+import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Bundle
+import android.os.Handler
+import android.os.HandlerThread
 import android.support.v4.content.FileProvider
 import android.support.v4.content.PermissionChecker
 import android.support.v7.app.AlertDialog
 import android.support.v7.app.AppCompatActivity
+import android.util.Log
 import android.util.Size
 import android.view.Surface
 import android.view.TextureView
 import android.view.View
 import android.webkit.MimeTypeMap
 import kotlinx.android.synthetic.main.activity_main.*
+import java.io.BufferedOutputStream
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.*
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
 
 @SuppressLint("MissingPermission")
 class MainActivity : AppCompatActivity() {
@@ -34,6 +45,9 @@ class MainActivity : AppCompatActivity() {
     private var timer: Timer? = null
     private var mediaRecorder: MediaRecorder? = null
     private var videoFilePath: String = ""
+    private var imageReaderHandlerThread: HandlerThread? = null
+    private var imageSavingHandlerThread: HandlerThread? = null
+    private var imageReader: ImageReader? = null
 
     private val surfaceTextureListener = object : TextureView.SurfaceTextureListener {
 
@@ -60,11 +74,112 @@ class MainActivity : AppCompatActivity() {
 
         startStopRecodingButton.setOnClickListener {
             if (isRecordingVideo) {
-                stopRecordingVideo()
+                stopCapturingImages()
                 cameraManager.startPreview(cameraTexture)
             } else {
-                startRecodingVideo()
+                startCapturingImages()
             }
+        }
+    }
+
+    private fun startCapturingImages() {
+        if (isRecordingVideo) {
+            return
+        }
+
+        prepareForVideoRecording()
+        imageReaderHandlerThread = HandlerThread("Image reader handler thread")
+        imageReaderHandlerThread?.start()
+        val handler = Handler(imageReaderHandlerThread?.looper)
+
+        imageSavingHandlerThread = HandlerThread("Image saving handler thread")
+        imageSavingHandlerThread?.start()
+        val savingHandler = Handler(imageSavingHandlerThread?.looper)
+
+        val filesDir = getExternalFilesDir("tmp")
+        videoFilePath = filesDir.absolutePath
+
+        for (file in filesDir.listFiles()) {
+            file.delete()
+        }
+
+
+        var counter = 0
+        imageReader = ImageReader.newInstance(previewSize.width, previewSize.height, ImageFormat.YUV_420_888, 2)
+        imageReader?.setOnImageAvailableListener({ reader: ImageReader? ->
+
+            if (reader == null) {
+                return@setOnImageAvailableListener
+            }
+
+            val latestImage = reader.acquireLatestImage() ?: return@setOnImageAvailableListener
+
+            try {
+                val grayPlane = latestImage.planes[0]
+                val buffer = grayPlane.buffer
+
+                val byteArray = ByteArray(reader.width * reader.height)
+                buffer.get(byteArray, 0, byteArray.size)
+
+                savingHandler.post(SaveProcessedBMPRunnable(byteArray, reader.width, reader.height, videoFilePath, counter++))
+            } catch (e: Exception) {
+                Log.e("Camera app", e.message, e)
+            } finally {
+                latestImage.close()
+            }
+
+
+        }, handler)
+
+        cameraManager.startFrameByFrameRecordingSession(cameraTexture, imageReader) {}
+    }
+
+    private fun stopCapturingImages() {
+        if (!isRecordingVideo) {
+            return
+        }
+
+        isRecordingVideo = false
+        timer?.cancel()
+
+        infoText.visibility = View.GONE
+        startStopRecodingButton.text = "Start recording"
+
+        val dialog = ProgressDialog.show(this, "Processing frames", "Wait until finishing processing files")
+
+        Handler(imageSavingHandlerThread?.looper).post {
+            imageReader?.close()
+
+            val directory = getExternalFilesDir("tmp")
+            val archive = File(getExternalFilesDir(null), "frames.zip")
+            val zipStream = ZipOutputStream(BufferedOutputStream(FileOutputStream(archive)))
+            val data = ByteArray(4096)
+
+            zipStream.use {
+                for (file in directory.listFiles()) {
+                    val fileInputStream = FileInputStream(file)
+
+                    fileInputStream.use {
+                        val entry = ZipEntry(file.name)
+                        zipStream.putNextEntry(entry)
+                        var count: Int
+                        while (true) {
+                            count = fileInputStream.read(data, 0, data.size)
+
+                            if (count == -1) {
+                                break
+                            }
+
+                            zipStream.write(data, 0, count)
+                        }
+                    }
+
+                }
+            }
+
+            videoFilePath = archive.absolutePath
+            dialog.dismiss()
+            showRecordedVideoResultDialog()
         }
     }
 
@@ -73,6 +188,17 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
+        prepareForVideoRecording()
+
+        videoFilePath = getVideoFilePath()
+        mediaRecorder = createMediaRecorder()
+
+        cameraManager.startMediaRecordingSession(cameraTexture, mediaRecorder) {
+            mediaRecorder?.start()
+        }
+    }
+
+    private fun prepareForVideoRecording() {
         isRecordingVideo = true
         recordingVideoTime = 0
         startStopRecodingButton.text = "Stop recording"
@@ -86,13 +212,6 @@ class MainActivity : AppCompatActivity() {
                     }
                 }
             }, 0L, 1000L)
-        }
-
-        videoFilePath = getVideoFilePath()
-        mediaRecorder = createMediaRecorder()
-
-        cameraManager.startMediaRecordingSession(cameraTexture, mediaRecorder) {
-            mediaRecorder?.start()
         }
     }
 
@@ -237,5 +356,6 @@ class MainActivity : AppCompatActivity() {
         }
         cameraTexture.setTransform(matrix)
     }
+
 
 }

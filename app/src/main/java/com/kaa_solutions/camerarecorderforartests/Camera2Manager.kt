@@ -3,6 +3,7 @@ package com.kaa_solutions.camerarecorderforartests
 import android.annotation.SuppressLint
 import android.content.Context
 import android.hardware.camera2.*
+import android.media.ImageReader
 import android.media.MediaRecorder
 import android.os.Handler
 import android.os.HandlerThread
@@ -82,6 +83,33 @@ class Camera2Manager(context: Context) {
         }
 
         cameraDevice?.createCaptureSession(arrayListOf(surfaceTarget, mediaRecorder?.surface), object : CameraCaptureSession.StateCallback() {
+
+            override fun onConfigureFailed(session: CameraCaptureSession?) {
+                Log.e("Camera", "Error configuring camera session")
+            }
+
+            override fun onConfigured(session: CameraCaptureSession?) {
+                cameraSession = session?.apply {
+                    setRepeatingRequest(captureRequestBuilder?.build(), null, cameraHandler)
+                }
+
+                onStartedRecording()
+            }
+        }, null)
+    }
+
+    fun startFrameByFrameRecordingSession(backgroundTextureView: TextureView, imageReader: ImageReader?, onStartedRecording: () -> Unit) {
+        if (!backgroundTextureView.isAvailable) {
+            return
+        }
+
+        val surfaceTarget = Surface(backgroundTextureView.surfaceTexture)
+        val captureRequestBuilder = setCaptureRequestData(cameraDevice?.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW))?.apply {
+            addTarget(surfaceTarget)
+            addTarget(imageReader?.surface)
+        }
+
+        cameraDevice?.createCaptureSession(arrayListOf(surfaceTarget, imageReader?.surface), object : CameraCaptureSession.StateCallback() {
 
             override fun onConfigureFailed(session: CameraCaptureSession?) {
                 Log.e("Camera", "Error configuring camera session")
